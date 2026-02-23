@@ -1,4 +1,4 @@
 streamlit
 pandas
-matplotlib==3.8.2
-numpy
+plotly
+qrcode

@@ -1,4 +1,5 @@
 streamlit
 pandas
 plotly
-qrcode
+qrcode[pil]
+Pillow

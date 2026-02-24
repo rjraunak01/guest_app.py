@@ -1,235 +1,499 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-from datetime import datetime, timedelta
-import hashlib
-import urllib.parse
-import qrcode
-from io import BytesIO
+import uuid
+from datetime import datetime
 import plotly.express as px
 
-# ================== CONFIG ==================
+st.set_page_config(page_title="CARNIVALE PRO", layout="wide")
 
-st.set_page_config(
-    page_title="CARNIVALE - Premium CRM",
-    layout="wide"
-)
+# ================= DATABASE =================
 
-APP_URL = "https://your-real-app-name.streamlit.app"
-
-# Dark Luxury UI
-st.markdown("""
-<style>
-body {background-color: #0f0f0f; color:white;}
-.stButton>button {background:#C19A6B;color:white;border-radius:10px;}
-</style>
-""", unsafe_allow_html=True)
-
-# ================== DATABASE ==================
-
-conn = sqlite3.connect("hospitality.db", check_same_thread=False)
+conn = sqlite3.connect("carnivale_pro.db", check_same_thread=False)
 c = conn.cursor()
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+# Tables
+c.execute("""CREATE TABLE IF NOT EXISTS branches(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+name TEXT UNIQUE
+)""")
 
-# USERS
-c.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT,
-    role TEXT
-)
-""")
+c.execute("""CREATE TABLE IF NOT EXISTS users(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+username TEXT UNIQUE,
+password TEXT,
+role TEXT,
+branch TEXT
+)""")
 
-# GUESTS
-c.execute("""
-CREATE TABLE IF NOT EXISTS guests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    mobile TEXT,
-    category TEXT,
-    pax INTEGER,
-    visit_date TEXT,
-    staff_name TEXT
-)
-""")
+c.execute("""CREATE TABLE IF NOT EXISTS guests(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+name TEXT,
+mobile TEXT,
+branch TEXT,
+staff TEXT,
+date TEXT
+)""")
 
-# FEEDBACK
-c.execute("""
-CREATE TABLE IF NOT EXISTS feedback (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guest_id INTEGER,
-    food INTEGER,
-    service INTEGER,
-    behaviour INTEGER,
-    ambience INTEGER,
-    cleanliness INTEGER,
-    comment TEXT,
-    date TEXT
-)
-""")
+c.execute("""CREATE TABLE IF NOT EXISTS feedback(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+feedback_id TEXT,
+guest_id INTEGER,
+food INTEGER,
+service INTEGER,
+behaviour INTEGER,
+ambience INTEGER,
+cleanliness INTEGER,
+comment TEXT,
+date TEXT
+)""")
 
 conn.commit()
 
-# Default Admin
-admin = pd.read_sql("SELECT * FROM users WHERE username='admin'", conn)
-if admin.empty:
-    c.execute("INSERT INTO users (username,password,role) VALUES (?,?,?)",
-              ("admin", hash_password("admin123"), "admin"))
-    conn.commit()
+# ================= SESSION =================
 
-# ================== SESSION TIMEOUT ==================
+if "login" not in st.session_state:
+    st.session_state.login = False
 
-if "last_active" not in st.session_state:
-    st.session_state.last_active = datetime.now()
+# ================= LOGIN =================
 
-if datetime.now() - st.session_state.last_active > timedelta(minutes=30):
-    st.session_state.user = None
-    st.session_state.role = None
-
-st.session_state.last_active = datetime.now()
-
-# ================== FEEDBACK PAGE ==================
-
-query = st.query_params
-
-if "feedback" in query:
-
-    guest_id = query["feedback"]
-
-    st.title("🌟 CARNIVALE Premium Feedback")
-
-    food = st.slider("🍽 Food",1,5)
-    service = st.slider("🛎 Service",1,5)
-    behaviour = st.slider("😊 Behaviour",1,5)
-    ambience = st.slider("✨ Ambience",1,5)
-    cleanliness = st.slider("🧼 Cleanliness",1,5)
-    comment = st.text_area("Your Comments")
-
-    if st.button("Submit Feedback"):
-        c.execute("""
-        INSERT INTO feedback
-        (guest_id,food,service,behaviour,ambience,cleanliness,comment,date)
-        VALUES (?,?,?,?,?,?,?,?)
-        """,(guest_id,food,service,behaviour,ambience,cleanliness,
-             comment,datetime.now()))
-        conn.commit()
-
-        st.success("Thank You For Visiting CARNIVALE ❤️")
-        st.balloons()
-
-    st.stop()
-
-# ================== LOGIN ==================
-
-if "user" not in st.session_state:
-    st.session_state.user = None
-    st.session_state.role = None
-
-if st.session_state.user is None:
-
-    st.title("CARNIVALE Login")
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+def login():
+    st.title("🎭 CARNIVALE PRO LOGIN")
+    user = st.text_input("Username")
+    pwd = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        user = pd.read_sql(
-            "SELECT * FROM users WHERE username=? AND password=?",
-            conn,
-            params=(username, hash_password(password))
-        )
-        if not user.empty:
-            st.session_state.user = username
-            st.session_state.role = user["role"][0]
+        result = pd.read_sql("SELECT * FROM users WHERE username=? AND password=?",
+                             conn, params=(user, pwd))
+        if not result.empty:
+            st.session_state.login = True
+            st.session_state.username = user
+            st.session_state.role = result.iloc[0]["role"]
+            st.session_state.branch = result.iloc[0]["branch"]
+            st.success("Login Successful")
             st.rerun()
         else:
             st.error("Invalid Credentials")
 
-    st.stop()
+# ================= PERMISSION MATRIX =================
 
-# ================== SIDEBAR ==================
+def check_permission(role, action):
+    permissions = {
+        "admin": ["add_branch","add_user","view_all","feedback","analytics"],
+        "staff": ["feedback","view_branch"]
+    }
+    return action in permissions.get(role, [])
 
-st.sidebar.write(f"👤 {st.session_state.user}")
-if st.sidebar.button("Logout"):
-    st.session_state.user = None
-    st.session_state.role = None
-    st.rerun()
+# ================= UI HEADER =================
 
-# ================== ADMIN ==================
+def header():
+    st.markdown("""
+    <h1 style='text-align:center;color:#D4AF37;'>🎭 CARNIVALE PRO ENTERPRISE</h1>
+    """, unsafe_allow_html=True)
 
-if st.session_state.role == "admin":
+# ================= MAIN APP =================
 
-    st.sidebar.markdown("### Admin Control")
+def main():
+    header()
 
-    if st.sidebar.button("Export All Data"):
-        df = pd.read_sql("SELECT * FROM guests", conn)
-        df.to_csv("export.csv", index=False)
-        st.sidebar.success("Exported")
+    role = st.session_state.role
+    branch = st.session_state.branch
 
-# ================== GUEST ENTRY ==================
+    menu = st.sidebar.selectbox("Menu",
+    ["Dashboard","Guest Entry","Feedback Form","Analytics","Admin Panel","Logout"])
 
-st.title("🏨 CARNIVALE Guest Entry")
+    # DASHBOARD
+    if menu=="Dashboard":
+        st.subheader("📊 Branch Dashboard")
 
-name = st.text_input("Guest Name")
-mobile = st.text_input("Mobile")
-category = st.selectbox("Category",
-                        ["Walk-in","VIP","Swiggy","Zomato","Party"])
-pax = st.number_input("PAX", min_value=1)
-visit_date = st.date_input("Visit Date")
+        if role=="admin":
+            data = pd.read_sql("SELECT * FROM guests",conn)
+        else:
+            data = pd.read_sql("SELECT * FROM guests WHERE branch=?",
+                               conn, params=(branch,))
 
-if st.button("Add Guest"):
+        st.metric("Total Guests",len(data))
 
-    c.execute("""
-    INSERT INTO guests (name,mobile,category,pax,visit_date,staff_name)
-    VALUES (?,?,?,?,?,?)
-    """,(name,mobile,category,pax,visit_date,st.session_state.user))
-    conn.commit()
+    # GUEST ENTRY
+    if menu=="Guest Entry":
+        st.subheader("📝 Guest Entry")
 
-    guest_id = c.lastrowid
+        branches = pd.read_sql("SELECT name FROM branches",conn)
 
-    feedback_link = f"{APP_URL}/?feedback={guest_id}"
+        if role=="staff":
+            selected_branch = branch
+        else:
+            selected_branch = st.selectbox("Branch",branches["name"])
 
-    message = f"Thank you for visiting CARNIVALE 🙏\nPlease share feedback:\n{feedback_link}"
-    encoded = urllib.parse.quote(message)
-    whatsapp_link = f"https://wa.me/?text={encoded}"
+        name = st.text_input("Guest Name")
+        mobile = st.text_input("Mobile")
 
-    st.success("Guest Added ✅")
+        if st.button("Submit Entry"):
+            c.execute("INSERT INTO guests(name,mobile,branch,staff,date) VALUES(?,?,?,?,?)",
+                      (name,mobile,selected_branch,
+                       st.session_state.username,str(datetime.now())))
+            conn.commit()
+            st.success("Guest Added")
 
-    st.link_button("📲 Send WhatsApp", whatsapp_link)
-    st.code(feedback_link)
+    # FEEDBACK
+    if menu=="Feedback Form":
+        st.subheader("⭐ Premium Feedback")
 
-    # QR
-    qr = qrcode.make(feedback_link)
-    buf = BytesIO()
-    qr.save(buf)
-    st.image(buf)
+        if role=="staff":
+            guests = pd.read_sql("SELECT * FROM guests WHERE branch=?",
+                                 conn, params=(branch,))
+        else:
+            guests = pd.read_sql("SELECT * FROM guests",conn)
 
-# ================== DASHBOARD ==================
+        if not guests.empty:
+            guest_select = st.selectbox("Select Guest",
+                                        guests["name"]+" - "+guests["mobile"])
 
-st.subheader("📊 Dashboard")
+            # Duplicate check
+            selected_mobile = guest_select.split(" - ")[1]
+            dup = pd.read_sql("SELECT * FROM feedback f JOIN guests g ON f.guest_id=g.id WHERE g.mobile=?",
+                              conn, params=(selected_mobile,))
 
-feedback_data = pd.read_sql("SELECT * FROM feedback", conn)
+            if not dup.empty:
+                st.warning("⚠ Feedback Already Submitted For This Guest")
 
-if not feedback_data.empty:
+            food = st.slider("🍽 Food",1,5)
+            service = st.slider("🤵 Service",1,5)
+            behaviour = st.slider("🙂 Behaviour",1,5)
+            ambience = st.slider("🏨 Ambience",1,5)
+            cleanliness = st.slider("🧹 Cleanliness",1,5)
+            comment = st.text_area("Comment")
 
-    feedback_data["avg"] = feedback_data[
-        ["food","service","behaviour","ambience","cleanliness"]
-    ].mean(axis=1)
+            if st.button("Submit Feedback"):
+                guest_id = guests.iloc[
+                    guests["name"]+" - "+guests["mobile"]==guest_select].id.values[0]
 
-    overall = round(feedback_data["avg"].mean(),2)
+                feedback_id = "FDBK-"+str(uuid.uuid4())[:8]
 
-    st.metric("⭐ Overall Rating", overall)
+                c.execute("""INSERT INTO feedback
+                (feedback_id,guest_id,food,service,behaviour,ambience,cleanliness,comment,date)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (feedback_id,guest_id,food,service,behaviour,ambience,cleanliness,comment,str(datetime.now())))
+                conn.commit()
 
-    fig = px.bar(
-        feedback_data,
-        x="guest_id",
-        y="avg",
-        title="Guest Rating Graph"
-    )
-    st.plotly_chart(fig)
+                st.success(f"Feedback Submitted 🎉 ID: {feedback_id}")
+                st.balloons()
 
+    # ANALYTICS
+    if menu=="Analytics":
+        st.subheader("📈 Growth Analytics")
+
+        data = pd.read_sql("""
+        SELECT date, COUNT(id) as entries
+        FROM guests GROUP BY date
+        """,conn)
+
+        if not data.empty:
+            fig = px.line(data,x="date",y="entries",title="Daily Growth")
+            st.plotly_chart(fig)
+
+    # ADMIN PANEL
+    if menu=="Admin Panel" and role=="admin":
+        st.subheader("👑 Admin Controls")
+
+        new_branch = st.text_input("Add Branch")
+        if st.button("Create Branch"):
+            c.execute("INSERT INTO branches(name) VALUES(?)",(new_branch,))
+            conn.commit()
+            st.success("Branch Added")
+
+        st.markdown("---")
+        st.subheader("Add User")
+
+        uname = st.text_input("Username")
+        pwd = st.text_input("Password")
+        role_new = st.selectbox("Role",["admin","staff"])
+        branch_new = st.text_input("Branch (For Staff)")
+
+        if st.button("Create User"):
+            c.execute("INSERT INTO users(username,password,role,branch) VALUES(?,?,?,?)",
+                      (uname,pwd,role_new,branch_new))
+            conn.commit()
+            st.success("User Created")
+
+    if menu=="Logout":
+        st.session_state.login=False
+        st.rerun()
+
+# ================= APP FLOW =================
+
+if not st.session_state.login:
+    login()
 else:
-    st.info("No Feedback Yet")
+    main()
+    if menu=="Analytics":
+        st.subheader("📈 Growth Analytics Intelligence")
+
+        guests_df = pd.read_sql("SELECT * FROM guests",conn)
+        feedback_df = pd.read_sql("""
+        SELECT f.*, g.staff, g.branch, g.mobile
+        FROM feedback f
+        JOIN guests g ON f.guest_id=g.id
+        """,conn)
+
+        if role=="staff":
+            guests_df = guests_df[guests_df["branch"]==branch]
+            feedback_df = feedback_df[feedback_df["branch"]==branch]
+
+        # Daily Growth
+        guests_df["date_only"] = pd.to_datetime(guests_df["date"]).dt.date
+        daily = guests_df.groupby("date_only").size().reset_index(name="entries")
+
+        if not daily.empty:
+            fig = px.line(daily,x="date_only",y="entries",title="Daily Guest Growth")
+            st.plotly_chart(fig)
+
+        # Monthly Growth
+        guests_df["month"] = pd.to_datetime(guests_df["date"]).dt.to_period("M").astype(str)
+        monthly = guests_df.groupby("month").size().reset_index(name="entries")
+
+        if not monthly.empty:
+            fig2 = px.bar(monthly,x="month",y="entries",title="Monthly Growth")
+            st.plotly_chart(fig2)
+
+        st.markdown("### 🔁 Repeat Customer Intelligence")
+
+        repeat = guests_df.groupby("mobile").size().reset_index(name="visits")
+        repeat = repeat[repeat["visits"]>1]
+
+        if not repeat.empty:
+            repeat_detail = pd.merge(repeat,guests_df,on="mobile")
+            st.dataframe(repeat_detail[["name","mobile","branch","staff","visits"]])
+        else:
+            st.info("No Repeat Guests Yet")
+
+        st.markdown("### 🚨 Multi Feedback Alert")
+
+        multi_feedback = feedback_df.groupby("mobile").size().reset_index(name="feedback_count")
+        multi_feedback = multi_feedback[multi_feedback["feedback_count"]>1]
+
+        if not multi_feedback.empty:
+            st.warning("Multiple feedback submitted by same mobile")
+            st.dataframe(multi_feedback)
+        else:
+            st.success("No Multiple Feedback Detected")
+
+        st.markdown("### 🕵 Backdate Fraud Detection")
+
+        fraud = guests_df[pd.to_datetime(guests_df["date"]) < pd.Timestamp.now() - pd.Timedelta(days=30)]
+        if not fraud.empty:
+            st.error("Old Backdated Entries Found")
+            st.dataframe(fraud[["name","mobile","date","staff"]])
+        else:
+            st.success("No Backdated Fraud Detected")
+menu = st.sidebar.selectbox("Menu",
+["Dashboard","Guest Entry","Feedback Form","Analytics","Performance & Salary","Admin Panel","Logout"])
+    if menu=="Performance & Salary":
+        st.subheader("💰 Staff Performance Intelligence")
+
+        df = pd.read_sql("""
+        SELECT g.staff,
+        COUNT(f.id) as total_feedback,
+        AVG((f.food+f.service+f.behaviour+f.ambience+f.cleanliness)/5.0) as avg_rating
+        FROM feedback f
+        JOIN guests g ON f.guest_id=g.id
+        GROUP BY g.staff
+        """,conn)
+
+        if role=="staff":
+            df = df[df["staff"]==st.session_state.username]
+
+        if not df.empty:
+            # Advanced Salary Formula
+            base_salary = 10000
+            df["rating_bonus"] = df["avg_rating"]*2000
+            df["volume_bonus"] = df["total_feedback"]*50
+            df["final_salary"] = base_salary + df["rating_bonus"] + df["volume_bonus"]
+
+            st.dataframe(df)
+
+            st.markdown("### 📊 Performance Chart")
+            fig = px.bar(df,x="staff",y="final_salary",title="Salary Comparison")
+            st.plotly_chart(fig)
+
+        else:
+            st.info("No Feedback Data Yet")
+menu = st.sidebar.selectbox("Menu",
+["Dashboard","Guest Entry","Feedback Form","Analytics",
+"Performance & Salary","Automation Center",
+"Admin Panel","Logout"])
+    if menu=="Automation Center":
+        st.subheader("🤖 Automation Center")
+
+        role = st.session_state.role
+
+        if role!="admin":
+            st.error("Permission Denied")
+            st.stop()
+
+        data = pd.read_sql("""
+        SELECT g.name,g.mobile,g.branch,g.staff,f.comment,f.date
+        FROM feedback f
+        JOIN guests g ON f.guest_id=g.id
+        """,conn)
+
+        if data.empty:
+            st.info("No Data Available")
+        else:
+
+            # ================= PDF EXPORT =================
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+            from reportlab.lib import colors
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import pagesizes
+
+            if st.button("Generate PDF Report"):
+                file="carnivale_report.pdf"
+                doc = SimpleDocTemplate(file,pagesize=pagesizes.A4)
+                elements=[]
+                styles=getSampleStyleSheet()
+                elements.append(Paragraph("CARNIVALE ENTERPRISE REPORT",styles["Title"]))
+                elements.append(Spacer(1,12))
+                table_data=[list(data.columns)]+data.values.tolist()
+                t=Table(table_data)
+                t.setStyle([('BACKGROUND',(0,0),(-1,0),colors.gold),
+                            ('GRID',(0,0),(-1,-1),1,colors.black)])
+                elements.append(t)
+                doc.build(elements)
+
+                with open(file,"rb") as f:
+                    st.download_button("Download PDF",f,file)
+
+            # ================= EXCEL EXPORT =================
+            if st.button("Export Excel"):
+                excel_file="carnivale_report.xlsx"
+                data.to_excel(excel_file,index=False)
+                with open(excel_file,"rb") as f:
+                    st.download_button("Download Excel",f,excel_file)
+
+            # ================= EMAIL AUTO SEND =================
+            import smtplib
+            from email.mime.text import MIMEText
+
+            email_to = st.text_input("Send Report To Email")
+
+            if st.button("Send Email Report"):
+                try:
+                    msg = MIMEText("CARNIVALE Report Attached.")
+                    msg["Subject"]="CARNIVALE Enterprise Report"
+                    msg["From"]=st.secrets["EMAIL_USER"]
+                    msg["To"]=email_to
+
+                    server = smtplib.SMTP("smtp.gmail.com",587)
+                    server.starttls()
+                    server.login(st.secrets["EMAIL_USER"],st.secrets["EMAIL_PASS"])
+                    server.sendmail(msg["From"],[email_to],msg.as_string())
+                    server.quit()
+
+                    st.success("Email Sent Successfully")
+
+                except Exception as e:
+                    st.error("Email Failed")
+
+            # ================= WHATSAPP AUTO SEND =================
+            from twilio.rest import Client
+
+            phone = st.text_input("Send WhatsApp To (with country code)")
+
+            if st.button("Send WhatsApp Notification"):
+                try:
+                    client = Client(st.secrets["TWILIO_SID"],st.secrets["TWILIO_AUTH"])
+                    client.messages.create(
+                        body="CARNIVALE Report Generated Successfully",
+                        from_=st.secrets["TWILIO_NUMBER"],
+                        to="whatsapp:"+phone
+                    )
+                    st.success("WhatsApp Sent")
+
+                except:
+                    st.error("WhatsApp Failed")
+st.toast("Notification: New Feedback Received 🚀")
+st.markdown("""
+<style>
+.card {
+    background-color: #1e1e1e;
+    padding: 20px;
+    border-radius: 15px;
+    box-shadow: 0 0 15px rgba(212,175,55,0.5);
+    margin-bottom: 20px;
+}
+.gold {
+    color: #D4AF37;
+    font-weight: bold;
+}
+.stButton>button {
+    border-radius: 10px;
+    background-color: #D4AF37;
+    color: black;
+    font-weight: bold;
+}
+</style>
+""", unsafe_allow_html=True)
+if menu=="Dashboard":
+    st.subheader("📊 Branch Dashboard")
+
+    if role=="admin":
+        data = pd.read_sql("SELECT * FROM guests",conn)
+    else:
+        data = pd.read_sql("SELECT * FROM guests WHERE branch=?",
+                           conn, params=(branch,))
+
+    col1,col2 = st.columns(2)
+
+    with col1:
+        st.markdown(f"<div class='card'><h2 class='gold'>Total Guests</h2><h1>{len(data)}</h1></div>",unsafe_allow_html=True)
+
+    feedback_count = pd.read_sql("SELECT COUNT(*) as c FROM feedback",conn)["c"][0]
+
+    with col2:
+        st.markdown(f"<div class='card'><h2 class='gold'>Total Feedback</h2><h1>{feedback_count}</h1></div>",unsafe_allow_html=True)
+def emoji_rating(label):
+    st.markdown(f"### {label}")
+    rating = st.radio(
+        "",
+        ["😡 1","😕 2","😐 3","🙂 4","😍 5"],
+        horizontal=True,
+        key=label
+    )
+    return int(rating.split()[1])
+food = emoji_rating("🍽 Food")
+service = emoji_rating("🤵 Service")
+behaviour = emoji_rating("🙂 Behaviour")
+ambience = emoji_rating("🏨 Ambience")
+cleanliness = emoji_rating("🧹 Cleanliness")
+st.success(f"Feedback Submitted 🎉 ID: {feedback_id}")
+st.balloons()
+
+st.markdown("""
+<div class='card'>
+<h2 class='gold'>🙏 Thank You For Your Valuable Feedback</h2>
+<p>Your response helps CARNIVALE grow better every day.</p>
+</div>
+""",unsafe_allow_html=True)
+def check_permission(role, action):
+    permissions = {
+        "admin": ["all"],
+        "staff": ["guest_entry","feedback","dashboard","performance"]
+    }
+
+    if "all" in permissions.get(role,[]):
+        return True
+
+    return action in permissions.get(role,[])
+if not check_permission(role,"guest_entry"):
+    st.error("Access Denied")
+    st.stop()
+if role=="staff":
+    st.info("You can only add entries for your branch.")
+if role=="admin":
+    branch_filter = st.selectbox("Filter By Branch",
+                                 ["All"] + list(pd.read_sql("SELECT name FROM branches",conn)["name"]))
+
+    if branch_filter!="All":
+        guests_df = guests_df[guests_df["branch"]==branch_filter]
+        feedback_df = feedback_df[feedback_df["branch"]==branch_filter]
